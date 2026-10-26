@@ -59,6 +59,24 @@ public class SchemaSyncService : ISchemaSyncService
                     "No se pudo crear automáticamente la tabla {TableName} en destino. " +
                     "Revise el DDL generado y créela manualmente si es necesario.",
                     schema.TableName);
+                continue;
+            }
+
+            foreach (var indexDdl in targetDialect.GenerateCreateIndexDdl(schema))
+            {
+                using var indexCommand = connection.CreateCommand();
+                indexCommand.CommandText = indexDdl;
+
+                try
+                {
+                    await indexCommand.ExecuteNonQueryAsync();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "No se pudo crear el índice en {TableName} con DDL: {Ddl}",
+                        schema.TableName, indexDdl);
+                }
             }
         }
     }

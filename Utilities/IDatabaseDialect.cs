@@ -25,6 +25,31 @@ public interface IDatabaseDialect
     /// <summary>Genera el DDL (CREATE TABLE) traduciendo tipos desde el esquema de origen.</summary>
     string GenerateCreateTableDdl(TableSchema sourceSchema);
 
+    /// <summary>Genera los CREATE INDEX (excluyendo PK) traducidos desde el esquema de origen.</summary>
+    List<string> GenerateCreateIndexDdl(TableSchema sourceSchema);
+
+    /// <summary>
+    /// true si el dialecto soporta el modo de recarga destructiva: eliminar FKs e índices secundarios
+    /// en destino antes de truncar/cargar, y recrearlos después. Solo SQL Server lo necesita hoy
+    /// (MySQL y PostgreSQL ya truncan y resetean el autoincremento sin este rodeo).
+    /// </summary>
+    bool SupportsDestructiveReload => false;
+
+    /// <summary>
+    /// Captura la definición de TODAS las FKs existentes en destino y las elimina (ALTER TABLE DROP CONSTRAINT),
+    /// guardándolas internamente para que RecreateForeignKeysAsync las recree idénticas. Solo destino, nunca origen.
+    /// </summary>
+    Task DropForeignKeysAsync(DbConnection connection) => Task.CompletedTask;
+
+    /// <summary>Recrea las FKs eliminadas previamente por DropForeignKeysAsync.</summary>
+    Task RecreateForeignKeysAsync(DbConnection connection) => Task.CompletedTask;
+
+    /// <summary>
+    /// Elimina los índices secundarios (no PK) de una tabla en destino, para que el truncate/carga
+    /// no choque con definiciones de unicidad que puedan no coincidir con los datos de origen.
+    /// </summary>
+    Task DropSecondaryIndexesAsync(DbConnection connection, string tableName) => Task.CompletedTask;
+
     Task TruncateOrDeleteAsync(DbConnection connection, string tableName, ILoggerAdapter logger);
 
     Task SetConstraintCheckingAsync(DbConnection connection, string tableName, bool enabled);

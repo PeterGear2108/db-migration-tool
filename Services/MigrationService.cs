@@ -71,49 +71,111 @@ public class MigrationService : IMigrationService
             await _schemaSyncService.EnsureTablesExistAsync(
                 targetDialect, config.TargetConnectionString, config.SourceSchemas);
 
-            // 2. Fase de limpieza: TODAS las tablas quedan vacías primero (orden inverso de dependencias)
-            if (!config.DryRun)
+            // 2. Modo destructivo (solo destino, solo si lo soporta el dialecto): eliminar FKs e índices
+            //    secundarios ANTES de truncar, para que TRUNCATE no caiga a DELETE (lo que impide reiniciar
+            //    el IDENTITY) y para que la carga no choque con índices únicos desactualizados.
+            var destructiveMode = config.DestructiveReload && targetDialect.SupportsDestructiveReload;
+
+            if (!config.DryRun && destructiveMode)
             {
                 _logger.LogInformation("");
-                _logger.LogInformation("=== FASE DE LIMPIEZA ===");
-                await _cleanupService.TruncateTablesAsync(
-                    targetDialect, config.TargetConnectionString, config.TablesToMigrate);
-            }
-            else
-            {
-                _logger.LogInformation("MODO DRY-RUN: Se omite la limpieza de tablas");
-            }
+                _logger.LogInformation("=== MODO DESTRUCTIVO: eliminando FKs e índices secundarios en destino ===");
 
-            // 3. Fase de migración: solo tablas seleccionadas reciben datos
-            _logger.LogInformation("");
-            _logger.LogInformation("=== FASE DE MIGRACIÓN ===");
-            _logger.LogInformation("Tablas con datos: {Copy} | Tablas solo-esquema (sin datos): {Skip}",
-                tablesToCopy.Count, tablesSchemaOnly.Count);
+                using var ddlConnection = targetDialect.CreateConnection(config.TargetConnectionString);
+                await ddlConnection.OpenAsync();
 
-            foreach (var table in tablesSchemaOnly)
-            {
-                _logger.LogInformation("⊘ {TableName}: no seleccionada, se deja sin datos", table.TableName);
-            }
-
-            foreach (var table in tablesToCopy)
-            {
-                var tableResult = await MigrateTableAsync(table, sourceDialect, targetDialect, config);
-                report.TableResults.Add(tableResult);
-
-                if (tableResult.Success)
+                await targetDialect.DropForeignKeysAsync(ddlConnection);
+                foreach (var schema in config.SourceSchemas)
                 {
-                    report.SuccessfulTables++;
-                    report.TotalRowsMigrated += tableResult.RowsInserted;
+                    await targetDialect.DropSecondaryIndexesAsync(ddlConnection, schema.TableName);
+                }
+            }
+            else if (config.DestructiveReload && !destructiveMode)
+            {
+                _logger.LogWarning(
+                    "DestructiveReload está activo pero {Engine} no lo soporta; se ignora (truncate normal)",
+                    config.TargetEngine);
+            }
+
+            try
+            {
+                // 3. Fase de limpieza: TODAS las tablas quedan vacías primero (orden inverso de dependencias)
+                if (!config.DryRun)
+                {
+                    _logger.LogInformation("");
+                    _logger.LogInformation("=== FASE DE LIMPIEZA ===");
+                    await _cleanupService.TruncateTablesAsync(
+                        targetDialect, config.TargetConnectionString, config.TablesToMigrate);
                 }
                 else
                 {
-                    report.FailedTables++;
+                    _logger.LogInformation("MODO DRY-RUN: Se omite la limpieza de tablas");
+                }
 
-                    if (!config.ContinueOnError)
+                // 4. Fase de migración: solo tablas seleccionadas reciben datos
+                _logger.LogInformation("");
+                _logger.LogInformation("=== FASE DE MIGRACIÓN ===");
+                _logger.LogInformation("Tablas con datos: {Copy} | Tablas solo-esquema (sin datos): {Skip}",
+                    tablesToCopy.Count, tablesSchemaOnly.Count);
+
+                foreach (var table in tablesSchemaOnly)
+                {
+                    _logger.LogInformation("⊘ {TableName}: no seleccionada, se deja sin datos", table.TableName);
+                }
+
+                foreach (var table in tablesToCopy)
+                {
+                    var tableResult = await MigrateTableAsync(table, sourceDialect, targetDialect, config);
+                    report.TableResults.Add(tableResult);
+
+                    if (tableResult.Success)
                     {
-                        _logger.LogError("Abortando migración debido a error en {TableName}", table.TableName);
-                        break;
+                        report.SuccessfulTables++;
+                        report.TotalRowsMigrated += tableResult.RowsInserted;
                     }
+                    else
+                    {
+                        report.FailedTables++;
+
+                        if (!config.ContinueOnError)
+                        {
+                            _logger.LogError("Abortando migración debido a error en {TableName}", table.TableName);
+                            break;
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                // 5. Recrear índices y FKs eliminados en el paso 2, siempre (incluso si algo falló arriba),
+                //    para no dejar destino sin constraints por un error a mitad de camino.
+                if (!config.DryRun && destructiveMode)
+                {
+                    _logger.LogInformation("");
+                    _logger.LogInformation("=== MODO DESTRUCTIVO: recreando índices y FKs en destino ===");
+
+                    using var ddlConnection = targetDialect.CreateConnection(config.TargetConnectionString);
+                    await ddlConnection.OpenAsync();
+
+                    foreach (var schema in config.SourceSchemas)
+                    {
+                        foreach (var indexDdl in targetDialect.GenerateCreateIndexDdl(schema))
+                        {
+                            using var indexCommand = ddlConnection.CreateCommand();
+                            indexCommand.CommandText = indexDdl;
+
+                            try
+                            {
+                                await indexCommand.ExecuteNonQueryAsync();
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning(ex, "No se pudo recrear el índice con DDL: {Ddl}", indexDdl);
+                            }
+                        }
+                    }
+
+                    await targetDialect.RecreateForeignKeysAsync(ddlConnection);
                 }
             }
 

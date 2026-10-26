@@ -100,6 +100,34 @@ public class MySqlDialect : IDatabaseDialect
             }
         }
 
+        const string indexQuery = @"
+            SELECT INDEX_NAME, NON_UNIQUE, COLUMN_NAME
+            FROM information_schema.STATISTICS
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @TableName AND INDEX_NAME <> 'PRIMARY'
+            ORDER BY INDEX_NAME, SEQ_IN_INDEX";
+
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = indexQuery;
+            AddParam(command, "@TableName", tableName);
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                var indexName = reader.GetString(0);
+                var isUnique = Convert.ToInt32(reader.GetValue(1)) == 0;
+                var columnName = reader.GetString(2);
+
+                var index = schema.Indexes.FirstOrDefault(i => i.IndexName == indexName);
+                if (index is null)
+                {
+                    index = new IndexInfo { IndexName = indexName, IsUnique = isUnique };
+                    schema.Indexes.Add(index);
+                }
+
+                index.Columns.Add(columnName);
+            }
+        }
+
         return schema;
     }
 
@@ -134,6 +162,16 @@ public class MySqlDialect : IDatabaseDialect
 
         sql += "\n) ENGINE=InnoDB";
         return sql;
+    }
+
+    public List<string> GenerateCreateIndexDdl(TableSchema sourceSchema)
+    {
+        return sourceSchema.Indexes.Select(ix =>
+        {
+            var unique = ix.IsUnique ? "UNIQUE " : "";
+            var columns = string.Join(", ", ix.Columns.Select(EscapeIdentifier));
+            return $"CREATE {unique}INDEX {EscapeIdentifier(ix.IndexName)} ON {EscapeIdentifier(sourceSchema.TableName)} ({columns})";
+        }).ToList();
     }
 
     private static string MapType(ColumnSchema c)

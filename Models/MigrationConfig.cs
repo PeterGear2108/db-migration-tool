@@ -13,6 +13,14 @@ public class MigrationConfig
     public int BatchSize { get; set; } = 1000;
 
     /// <summary>
+    /// Modo destructivo: en destino, elimina FKs e índices secundarios antes de truncar/cargar y los
+    /// recrea al final. Resuelve que TRUNCATE falle/caiga a DELETE por FKs (lo que impide reiniciar el
+    /// IDENTITY) y que índices únicos con definición desactualizada rompan la carga de datos.
+    /// Solo tiene efecto si el dialecto de destino lo soporta (hoy: SQL Server). Nunca toca el origen.
+    /// </summary>
+    public bool DestructiveReload { get; set; } = false;
+
+    /// <summary>
     /// Tablas excluidas por completo de cualquier selección interactiva (ej. ventas/facturación).
     /// Siempre se crean en destino sin datos.
     /// </summary>

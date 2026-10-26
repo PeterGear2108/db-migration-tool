@@ -110,6 +110,38 @@ public class PostgreSqlDialect : IDatabaseDialect
             }
         }
 
+        const string indexQuery = @"
+            SELECT i.relname AS index_name, ix.indisunique AS is_unique, a.attname AS column_name
+            FROM pg_index ix
+            JOIN pg_class i ON i.oid = ix.indexrelid
+            JOIN pg_class t ON t.oid = ix.indrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+            WHERE t.relname = @TableName AND n.nspname = 'public' AND NOT ix.indisprimary
+            ORDER BY i.relname, array_position(ix.indkey, a.attnum)";
+
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = indexQuery;
+            AddParam(command, "TableName", tableName);
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                var indexName = reader.GetString(0);
+                var isUnique = reader.GetBoolean(1);
+                var columnName = reader.GetString(2);
+
+                var index = schema.Indexes.FirstOrDefault(i => i.IndexName == indexName);
+                if (index is null)
+                {
+                    index = new IndexInfo { IndexName = indexName, IsUnique = isUnique };
+                    schema.Indexes.Add(index);
+                }
+
+                index.Columns.Add(columnName);
+            }
+        }
+
         return schema;
     }
 
@@ -146,6 +178,16 @@ public class PostgreSqlDialect : IDatabaseDialect
 
         sql += "\n)";
         return sql;
+    }
+
+    public List<string> GenerateCreateIndexDdl(TableSchema sourceSchema)
+    {
+        return sourceSchema.Indexes.Select(ix =>
+        {
+            var unique = ix.IsUnique ? "UNIQUE " : "";
+            var columns = string.Join(", ", ix.Columns.Select(EscapeIdentifier));
+            return $"CREATE {unique}INDEX {EscapeIdentifier(ix.IndexName)} ON {EscapeIdentifier(sourceSchema.TableName)} ({columns})";
+        }).ToList();
     }
 
     private static string MapToSerial(string sourceType) => sourceType.ToLower() switch

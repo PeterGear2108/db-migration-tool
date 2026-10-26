@@ -55,6 +55,7 @@ try
         ConfirmBeforeTruncate = configuration.GetValue<bool>("MigrationSettings:ConfirmBeforeTruncate"),
         ContinueOnError = configuration.GetValue<bool>("MigrationSettings:ContinueOnError"),
         EnableIdentityInsert = configuration.GetValue<bool>("MigrationSettings:EnableIdentityInsert"),
+        DestructiveReload = configuration.GetValue<bool>("MigrationSettings:DestructiveReload"),
         BatchSize = configuration.GetValue<int>("MigrationSettings:BatchSize"),
         AlwaysExcludedTables = configuration.GetSection("AlwaysExcludedTables").Get<List<string>>() ?? new(),
         SelectedTableNames = configuration.GetSection("SelectedTableNames").Get<List<string>>()
